@@ -85,7 +85,7 @@ def parallal_choices_test(iter,sup,sub,node):
             
             # Matrix 1: varying supergroups
             print(f"  Matrix 1 - supergroups: {i*sup}×{sub}×{node}")
-            L = generate_layers_groups_graph(
+            L1 = generate_layers_groups_graph(
                 num_supergroups=i*sup,
                 num_subgroups_per_supergroup=sub,
                 nodes_per_subgroup=node,
@@ -95,10 +95,10 @@ def parallal_choices_test(iter,sup,sub,node):
             )
             total_nodes = i *sup * sub * node
             
-            a1, b1, c1 = test_duration_memory(L, thre=node)
-            a2, b2, c2 = test_duration_memory(L, thre=1)
-            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
-            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
+            a1, b1, c1 = test_duration_memory(L1, thre=node)
+            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb, ratio ={100*c1:.1f}%")
+            a2, b2, c2 = test_duration_memory(L1, thre=1)
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb, ratio ={100*c2:.1f}%")
             
             writer.writerow(['supergroups', total_nodes, a1, b1, c1, a2, b2, c2])
             
@@ -113,10 +113,10 @@ def parallal_choices_test(iter,sup,sub,node):
                 p_inter_supergroup=0.05,
             )
             
-            a1, b1, c1 = test_duration_memory(L, thre=node)
-            a2, b2, c2 = test_duration_memory(L, thre=1)
-            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
-            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
+            a1, b1, c1 = test_duration_memory(L2, thre=node)
+            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb, ratio ={100*c1:.1f}%")
+            a2, b2, c2 = test_duration_memory(L2, thre=1)
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb, ratio ={100*c2:.1f}%")
             
             writer.writerow(['subgroups', total_nodes, a1, b1, c1, a2, b2, c2])
             
@@ -131,10 +131,10 @@ def parallal_choices_test(iter,sup,sub,node):
                 p_inter_supergroup=0.05,
             )
             
-            a1, b1, c1 = test_duration_memory(L, thre=i*node)
-            a2, b2, c2 = test_duration_memory(L, thre=1)
-            print(f"    thre={i*node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
-            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
+            a1, b1, c1 = test_duration_memory(L3, thre=i*node)
+            print(f"    thre={i*node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb, ratio ={100*c1:.1f}%")
+            a2, b2, c2 = test_duration_memory(L3, thre=1)
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb, ratio ={100*c2:.1f}%")
             
             writer.writerow(['nodes_per_sub', total_nodes, a1, b1, c1, a2, b2, c2])
             
@@ -209,7 +209,7 @@ def plot_results(csv_filename='parallel_test_results.csv'):
 
 # Example usage:
 # First run the test with custom parameters
-parallal_choices_test(iter=30, sup=1, sub=5, node=5)
+parallal_choices_test(iter=200, sup=1, sub=5, node=10)
 
 # Then create the plots
 plot_results()
