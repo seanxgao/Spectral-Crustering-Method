@@ -60,17 +60,16 @@ def test_duration_memory(oL, thre = None, show = False):
         combine_three_figures(fig1, fig2, fig3, 
                             titles=['Original', 'Shuffled', 'Restored'])
     orig_energy = grade_matrix(oL)
-    shuf_energy = grade_matrix(L)
     ordered_energy = grade_matrix(ordered_L)
-    if show: print(f"Total size {len(oL)}, took {duration:.2f}s, peak memory {peak_memory:.2f}MB, energy ratio {100 * ordered_energy/shuf_energy:.2f}%({100 * ordered_energy/orig_energy:.2f}%)")
-    return duration, peak_memory, ordered_energy/shuf_energy, ordered_energy/orig_energy
+    if show: print(f"Total size {len(oL)}, took {duration:.2f}s, peak memory {peak_memory:.2f}MB, energy ratio {100 * ordered_energy/orig_energy:.2f}%")
+    return duration, peak_memory, ordered_energy/orig_energy
 
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-def parallal_choices_test():
+def parallal_choices_test(iter,sup,sub,node):
     # Prepare CSV file
     csv_filename = 'parallel_test_results.csv'
     print(f"Starting parallel choices test - results will be saved to {csv_filename}")
@@ -78,66 +77,66 @@ def parallal_choices_test():
     with open(csv_filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         # Write header
-        writer.writerow(['matrix_type', 'total_nodes', 'a_thre10', 'b_thre10', 'c_thre10', 'd_thre10', 
-                        'a_thre1', 'b_thre1', 'c_thre1', 'd_thre1'])
+        writer.writerow(['matrix_type', 'total_nodes', 'duration_thre', 'memory_thre', 'ratio_thre', 
+                        'duration', 'memory', 'ratio'])
         
-        for i in range(1, 51):
-            print(f"Processing iteration {i}/50 (total_nodes = {i*10*10})")
+        for i in range(1, iter+1):
+            print(f"Processing iteration {i}/{iter} (total_nodes = {i*sup*sub*node})")
             
             # Matrix 1: varying supergroups
-            print(f"  Matrix 1 - supergroups: {i}×10×10")
+            print(f"  Matrix 1 - supergroups: {i*sup}×{sub}×{node}")
             L = generate_layers_groups_graph(
-                num_supergroups=i,
-                num_subgroups_per_supergroup=10,
-                nodes_per_subgroup=10,
+                num_supergroups=i*sup,
+                num_subgroups_per_supergroup=sub,
+                nodes_per_subgroup=node,
                 p_intra_subgroup=0.8,
                 p_intra_supergroup=0.3,
                 p_inter_supergroup=0.05,
             )
-            total_nodes = i * 10 * 10
+            total_nodes = i *sup * sub * node
             
-            a1, b1, c1, d1 = test_duration_memory(L, thre=10)
-            a2, b2, c2, d2 = test_duration_memory(L, thre=1)
-            print(f"    thre=10: a={a1:.3f}, b={b1:.3f}")
-            print(f"    thre=1:  a={a2:.3f}, b={b2:.3f}")
+            a1, b1, c1 = test_duration_memory(L, thre=node)
+            a2, b2, c2 = test_duration_memory(L, thre=1)
+            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
             
-            writer.writerow(['supergroups', total_nodes, a1, b1, c1, d1, a2, b2, c2, d2])
+            writer.writerow(['supergroups', total_nodes, a1, b1, c1, a2, b2, c2])
             
             # Matrix 2: varying subgroups
-            print(f"  Matrix 2 - subgroups: 1×{i*10}×10")
+            print(f"  Matrix 2 - subgroups: {sup}×{i*sub}×{node}")
             L2 = generate_layers_groups_graph(
-                num_supergroups=1,
-                num_subgroups_per_supergroup=i*10,
-                nodes_per_subgroup=10,
+                num_supergroups=sup,
+                num_subgroups_per_supergroup=i*sub,
+                nodes_per_subgroup=node,
                 p_intra_subgroup=0.8,
                 p_intra_supergroup=0.3,
                 p_inter_supergroup=0.05,
             )
             
-            a1, b1, c1, d1 = test_duration_memory(L2, thre=10)
-            a2, b2, c2, d2 = test_duration_memory(L2, thre=1)
-            print(f"    thre=10: a={a1:.3f}, b={b1:.3f}")
-            print(f"    thre=1:  a={a2:.3f}, b={b2:.3f}")
+            a1, b1, c1 = test_duration_memory(L, thre=node)
+            a2, b2, c2 = test_duration_memory(L, thre=1)
+            print(f"    thre={node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
             
-            writer.writerow(['subgroups', total_nodes, a1, b1, c1, d1, a2, b2, c2, d2])
+            writer.writerow(['subgroups', total_nodes, a1, b1, c1, a2, b2, c2])
             
             # Matrix 3: varying nodes per subgroup
-            print(f"  Matrix 3 - nodes_per_sub: 1×10×{i*10}")
+            print(f"  Matrix 3 - nodes_per_sub: {sup}×{sub}×{i*node}")
             L3 = generate_layers_groups_graph(
-                num_supergroups=1,
-                num_subgroups_per_supergroup=10,
-                nodes_per_subgroup=i*10,
+                num_supergroups=sup,
+                num_subgroups_per_supergroup=sub,
+                nodes_per_subgroup=i*node,
                 p_intra_subgroup=0.8,
                 p_intra_supergroup=0.3,
                 p_inter_supergroup=0.05,
             )
             
-            a1, b1, c1, d1 = test_duration_memory(L3, thre=10)
-            a2, b2, c2, d2 = test_duration_memory(L3, thre=1)
-            print(f"    thre=10: a={a1:.3f}, b={b1:.3f}")
-            print(f"    thre=1:  a={a2:.3f}, b={b2:.3f}")
+            a1, b1, c1 = test_duration_memory(L, thre=i*node)
+            a2, b2, c2 = test_duration_memory(L, thre=1)
+            print(f"    thre={i*node}: duration ={a1:.3f}s, peak memory={b1:.3f}Mb")
+            print(f"    thre=1:  duration ={a2:.3f}s, peak memory={b2:.3f}Mb")
             
-            writer.writerow(['nodes_per_sub', total_nodes, a1, b1, c1, d1, a2, b2, c2, d2])
+            writer.writerow(['nodes_per_sub', total_nodes, a1, b1, c1, a2, b2, c2])
             
             if i % 10 == 0:
                 print(f"  ✓ Completed {i}/50 iterations")
@@ -147,12 +146,12 @@ def parallal_choices_test():
 def read_csv_to_arrays(csv_filename='parallel_test_results.csv'):
     """Read CSV data into separate numpy arrays for each matrix type and threshold"""
     data = {
-        'supergroups': {'total_nodes': [], 'a_thre10': [], 'b_thre10': [], 'c_thre10': [], 'd_thre10': [],
-                       'a_thre1': [], 'b_thre1': [], 'c_thre1': [], 'd_thre1': []},
-        'subgroups': {'total_nodes': [], 'a_thre10': [], 'b_thre10': [], 'c_thre10': [], 'd_thre10': [],
-                     'a_thre1': [], 'b_thre1': [], 'c_thre1': [], 'd_thre1': []},
-        'nodes_per_sub': {'total_nodes': [], 'a_thre10': [], 'b_thre10': [], 'c_thre10': [], 'd_thre10': [],
-                         'a_thre1': [], 'b_thre1': [], 'c_thre1': [], 'd_thre1': []}
+        'supergroups': {'total_nodes': [], 'duration_thre': [], 'memory_thre': [], 'ratio_thre': [],
+                       'duration': [], 'memory': [], 'ratio': []},
+        'subgroups': {'total_nodes': [], 'duration_thre': [], 'memory_thre': [], 'ratio_thre': [],
+                     'duration': [], 'memory': [], 'ratio': []},
+        'nodes_per_sub': {'total_nodes': [], 'duration_thre': [], 'memory_thre': [], 'ratio_thre': [],
+                         'duration': [], 'memory': [], 'ratio': []}
     }
     
     with open(csv_filename, 'r') as csvfile:
@@ -170,18 +169,17 @@ def read_csv_to_arrays(csv_filename='parallel_test_results.csv'):
     return data
 
 def plot_results(csv_filename='parallel_test_results.csv'):
-    """Create 4 graphs with the specified requirements"""
+    """Create 3 graphs for duration, memory, and ratio with the specified requirements"""
     data = read_csv_to_arrays(csv_filename)
     
     # Define colors for each matrix type
     colors = {'supergroups': 'blue', 'subgroups': 'red', 'nodes_per_sub': 'green'}
     
-    # Create 4 subplots for a, b, c, d values
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    axes = axes.flatten()
+    # Create 3 subplots for duration, memory, ratio
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    metrics = ['a', 'b', 'c', 'd']
-    titles = ['Metric A', 'Metric B', 'Metric C', 'Metric D']
+    metrics = ['duration', 'memory', 'ratio']
+    titles = ['Duration (seconds)', 'Peak Memory (MB)', 'Ratio']
     
     for idx, metric in enumerate(metrics):
         ax = axes[idx]
@@ -190,17 +188,17 @@ def plot_results(csv_filename='parallel_test_results.csv'):
             x_data = data[matrix_type]['total_nodes']
             
             # Plot thre=1 (solid line)
-            y_data_thre1 = data[matrix_type][f'{metric}_thre1']
+            y_data_thre1 = data[matrix_type][metric]
             ax.plot(x_data, y_data_thre1, color=colors[matrix_type], 
                    linestyle='-', label=f'{matrix_type} (thre=1)', linewidth=2)
             
-            # Plot thre=10 (dotted line, same color)
-            y_data_thre10 = data[matrix_type][f'{metric}_thre10']
-            ax.plot(x_data, y_data_thre10, color=colors[matrix_type], 
-                   linestyle=':', label=f'{matrix_type} (thre=10)', linewidth=2)
+            # Plot thre=variable (dotted line, same color)
+            y_data_thre_var = data[matrix_type][f'{metric}_thre']
+            ax.plot(x_data, y_data_thre_var, color=colors[matrix_type], 
+                   linestyle=':', label=f'{matrix_type} (thre=variable)', linewidth=2)
         
         ax.set_xlabel('Total Nodes (num_sup × num_sub × nodes_per_sub)')
-        ax.set_ylabel(f'{titles[idx]} Value')
+        ax.set_ylabel(titles[idx])
         ax.set_title(f'{titles[idx]} vs Total Nodes')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -210,7 +208,8 @@ def plot_results(csv_filename='parallel_test_results.csv'):
     plt.show()
 
 # Example usage:
-# First run the test
-parallal_choices_test()
+# First run the test with custom parameters
+parallal_choices_test(iter=30, sup=1, sub=5, node=5)
+
 # Then create the plots
 plot_results()
