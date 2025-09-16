@@ -103,47 +103,52 @@ def generate_layers_groups_graph(
     p_intra_subgroup=0.8,
     p_intra_supergroup=0.3,
     p_inter_supergroup=0.05,
+    seed=None,          # 不传就用固定种子；传入则用你给的种子
 ):
-    """
-    Generates a hierarchical adjacency matrix and its Laplacian.
-    Structure: supergroup → subgroup → nodes.
-    """
+    # —— 全局种子（重置全局 RNG；每次调用都会固定住输出）——
+    if seed is None:
+        np.random.seed(841)
+    else:
+        np.random.seed(seed)
+
     total_nodes = num_supergroups * num_subgroups_per_supergroup * nodes_per_subgroup
-    A = np.zeros((total_nodes, total_nodes))
+    A = np.zeros((total_nodes, total_nodes), dtype=np.uint8)
 
-    def get_node_index(group, subgroup, node):
-        return (group * num_subgroups_per_supergroup + subgroup) * nodes_per_subgroup + node
+    def idx(g, sg, n):
+        return (g * num_subgroups_per_supergroup + sg) * nodes_per_subgroup + n
 
-    # Intra-supergroup connections
+    # Intra-supergroup
     for g in range(num_supergroups):
         for sg1 in range(num_subgroups_per_supergroup):
             for sg2 in range(num_subgroups_per_supergroup):
                 for n1 in range(nodes_per_subgroup):
                     for n2 in range(nodes_per_subgroup):
-                        i = get_node_index(g, sg1, n1)
-                        j = get_node_index(g, sg2, n2)
+                        i = idx(g, sg1, n1)
+                        j = idx(g, sg2, n2)
                         if i >= j:
                             continue
                         p = p_intra_subgroup if sg1 == sg2 else p_intra_supergroup
                         if np.random.rand() < p:
-                            A[i, j] = A[j, i] = 1
+                            A[i, j] = 1
+                            A[j, i] = 1
 
-    # Inter-supergroup connections
+    # Inter-supergroup
     for g1 in range(num_supergroups):
         for g2 in range(g1 + 1, num_supergroups):
             for sg1 in range(num_subgroups_per_supergroup):
                 for sg2 in range(num_subgroups_per_supergroup):
                     for n1 in range(nodes_per_subgroup):
                         for n2 in range(nodes_per_subgroup):
-                            i = get_node_index(g1, sg1, n1)
-                            j = get_node_index(g2, sg2, n2)
+                            i = idx(g1, sg1, n1)
+                            j = idx(g2, sg2, n2)
                             if np.random.rand() < p_inter_supergroup:
-                                A[i, j] = A[j, i] = 1
+                                A[i, j] = 1
+                                A[j, i] = 1
 
-    degree = np.sum(A, axis=1)
+    degree = A.sum(axis=1)
     L = np.diag(degree) - A
     return L
-
+    
 def matrix_shuffle(matrix):
     random_order = random.sample(range(len(matrix)), len(matrix))
     permuted_lap = matrix[np.ix_(random_order, random_order)]
