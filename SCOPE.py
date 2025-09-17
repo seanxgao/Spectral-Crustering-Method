@@ -1,13 +1,13 @@
 import numpy as np
-from scipy.sparse import linalg as LA
 from scipy.sparse import csr_matrix
 import time
 import matplotlib.pyplot as plt
 import random
 import sys
 from scipy import sparse as sp
-from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import eigsh  # sparse solver
+import os, math
+from concurrent.futures import ThreadPoolExecutor
 
 def bicut_group(L):
     """
@@ -36,7 +36,6 @@ def bicut_group(L):
     # Find the second smallest eigenvalue (Fiedler value)
     fiedler_vector = vecs[:, 1]
     sorted_args = np.argsort(fiedler_vector)
-    
     # Reorder adjacency matrix
     adj = -L[np.ix_(sorted_args,sorted_args)]  # Full adjacency matrix
     
@@ -94,7 +93,7 @@ class BiCutNode:
             is_last_child = (i == len(children) - 1)
             child.print_fancy_tree(new_prefix, is_last_child, False)
 
-def treebuilder(L, thre = None, indices=None, structure = "sparse"):
+def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = True):
     """
     Recursively apply bi-cut to create a tree structure.
     
@@ -105,8 +104,34 @@ def treebuilder(L, thre = None, indices=None, structure = "sparse"):
     Returns:
         BiCutNode: Root of the bi-cut tree
     """
-    if structure not in ("dense", "sparse"):
-        raise ValueError("structure must be 'dense' or 'sparse'.")
+
+    def _make_sub_laplacian_blocks(L_sub, g1_local, g2_local):
+        
+        idx1 = np.asarray(g1_local)
+        idx2 = np.asarray(g2_local) 
+        
+        if structure == "sparse":
+            if not sp.isspmatrix_csr(L_sub): L_sub = csr_matrix(L_sub)
+            L11 = L_sub[idx1, :][:, idx1].copy()
+            L22 = L_sub[idx2, :][:, idx2].copy()
+            
+            diff1  = np.asarray(L11.sum(axis=1)).ravel()
+            L11.setdiag(L11.diagonal() - diff1)
+            
+            diff2  = np.asarray(L22.sum(axis=1)).ravel()
+            L22.setdiag(L22.diagonal() - diff2)
+            
+            return L11, L22
+        else:
+            if sp.isspmatrix_csr(L_sub): L_sub = L_sub.toarray()
+            L11 = L_sub[np.ix_(idx1, idx1)].copy()
+            L22 = L_sub[np.ix_(idx2, idx2)].copy()
+
+            diff1 = L11.sum(axis=1)
+            diff2 = L22.sum(axis=1)
+            L11 = L11 - np.diag(diff1)
+            L22 = L22 - np.diag(diff2)
+            return L11, L22
 
     # Initialize indices if not provided
     if indices is None:
@@ -125,53 +150,58 @@ def treebuilder(L, thre = None, indices=None, structure = "sparse"):
     if thre != None and n <= thre:
         return BiCutNode(indices)
 
-    # if structure == "dense":
-    #     # Convert to dense (if sparse)
-    #     L = L.toarray() if sp.issparse(L) else L
-    # else:
-    #     L = L if sp.issparse(L) else csr_matrix(L)
-    #     # L = L.astype(np.float32)
-    
-    # Apply bi-cut on submatrix
-    first_group_local, second_group_local = bicut_group(L)
-    
-    # Convert local indices back to global indices
-    first_group = [indices[i] for i in first_group_local]
-    second_group = [indices[i] for i in second_group_local]
-    
-    # If second group is empty, this is a leaf node
-    if not second_group:
-        return BiCutNode(indices)
-    
-    # Create current node
-    node = BiCutNode(indices)
+    if structure not in ("dense", "sparse"):
+        raise ValueError("structure must be 'dense' or 'sparse'.")
 
-    leftmatrix  = L[np.ix_(first_group_local,  first_group_local)]
-    rightmatrix = L[np.ix_(second_group_local, second_group_local)]
-    
-    if structure == "sparse":
-        degdiff = np.asarray(leftmatrix.sum(axis=1)).ravel()
-        leftmatrix.setdiag(leftmatrix.diagonal() - degdiff)
-        leftmatrix.eliminate_zeros()
-    
-        degdiff = np.asarray(rightmatrix.sum(axis=1)).ravel()
-        rightmatrix.setdiag(rightmatrix.diagonal() - degdiff)
-        rightmatrix.eliminate_zeros()
-    # else:
-        # degdiff = leftmatrix.sum(axis=1)
-        # leftmatrix = leftmatrix - np.diag(degdiff)
-    
-        # degdiff = rightmatrix.sum(axis=1)
-        # rightmatrix = rightmatrix - np.diag(degdiff)
+    if parallel:
+        workers = max(os.cpu_count() or 1, 1)
+        max_parallel_depth = max(1, int(math.ceil(math.log2(workers))))
         
-    # Recursively process subgroups
-    node.left = treebuilder(leftmatrix, thre, first_group, structure)
-    node.right = treebuilder(rightmatrix, thre, second_group, structure)
-    
-    return node
+    # === 递归构建（根据 parallel 选择并/串行）===
+    def _build(L_sub, idxs, depth, executor=None):
+        n = len(idxs)
+        if n == 0:
+            raise ValueError("The matrix is empty.")
+        if n == 1:
+            return BiCutNode(idxs)
+        if n == 2:
+            return BiCutNode(idxs, BiCutNode([idxs[0]]), BiCutNode([idxs[1]]))
+        if (thre is not None) and (n <= thre):
+            return BiCutNode(idxs)
 
-import os, math
-from concurrent.futures import ThreadPoolExecutor
+        # bi-cut
+        g1_local, g2_local = bicut_group(L_sub)
+        # 若有一侧空，直接收叶
+        if len(g1_local) == 0 or len(g2_local) == 0:
+            return BiCutNode(idxs)
+
+        # 局部→全局
+        g1 = [idxs[i] for i in g1_local]
+        g2 = [idxs[i] for i in g2_local]
+
+        # 子块拉普拉斯
+        L11, L22 = _make_sub_laplacian_blocks(L_sub, g1_local, g2_local)
+
+        # 递归：并行 or 串行
+        if parallel and (depth < max_parallel_depth) and (executor is not None) and (workers > 1):
+            f_left  = executor.submit(_build, L11, g1, depth + 1, executor)
+            f_right = executor.submit(_build, L22, g2, depth + 1, executor)
+            left  = f_left.result()
+            right = f_right.result()
+        else:
+            left  = _build(L11, g1, depth + 1, executor)
+            right = _build(L22, g2, depth + 1, executor)
+
+        return BiCutNode(idxs, left, right)
+
+    # 顶层入口：并行就开线程池；串行就直接跑
+    if parallel:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return _build(L, indices, 0, ex)
+    else:
+        return _build(L, indices, 0, None)
+
+
 
 def treebuilder_parallel(L, thre=None, workers=None, max_parallel_depth=None):
     """
@@ -235,7 +265,3 @@ def treebuilder_parallel(L, thre=None, workers=None, max_parallel_depth=None):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         root = _build(L, list(range(L.shape[0])), 0, ex)
     return root
-
-
-
-

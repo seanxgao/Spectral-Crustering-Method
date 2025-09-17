@@ -57,7 +57,7 @@ def test_duration_memory(
     use_parallel=False,
     workers=None,
     max_parallel_depth=None,
-    stru = "sparse"
+    stru = "dense"
 ):
     """
     行为和你现有的 test_duration_memory 一致，但多了 use_parallel 与并行参数。
@@ -67,16 +67,7 @@ def test_duration_memory(
     # 1) 乱序
     L = matrix_shuffle(oL)
 
-    # 2) 选择构树函数（与原版一致地交给 measure_time_and_memory）
-    if use_parallel:
-        def builder_func(Lin, thr, stru):
-            return treebuilder_parallel(Lin, thre=thr, workers=workers, max_parallel_depth=max_parallel_depth)
-    else:
-        def builder_func(Lin, thr, stru):
-            return treebuilder(Lin, thre=thr, structure = stru)
-
-    # 3) 计时与内存：沿用你现成的封装
-    T, duration, peak_memory = measure_time_and_memory(builder_func, L, thre, stru)
+    T, duration, peak_memory = measure_time_and_memory(treebuilder, L, thre, None, stru, use_parallel)
 
     # 4) 取顺序并重排
     order = T.get_order()
@@ -101,7 +92,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-def run_one_graph_test(sup: int, sub: int, node: int, thre: int, parallel: bool = False, structure: str = "sparse"):
+def run_one_graph_test(sup: int, sub: int, node: int, thre: int, parallel: bool = False, structure: str = "dense"):
     """
     只跑一次：构图 -> 两次测量(thre=node 与 thre=1)。
     不打印，不写文件；返回一个 dict，外层随意使用。
@@ -269,3 +260,11 @@ def plot_results(csv_filename='parallel_test_results.csv'):
     plt.tight_layout()
     plt.savefig('parallel_test_results.png', dpi=300, bbox_inches='tight')
     plt.show()
+
+L = generate_layers_groups_graph(2,20,30,0.8,0.3,0.05)
+print(test_duration_memory(L,thre=1,show=False,use_parallel=True,stru = "dense"))
+print(test_duration_memory(L,thre=1,show=False,use_parallel=False,stru = "dense"))
+print(test_duration_memory(L,thre=1,show=False,use_parallel=False,stru = "sparse"))
+# visualize_laplacian_matrix(L)
+# print(measure_time_and_memory(eigsh,csr_matrix(L),k=2,which = 'SA')[1])
+# print(measure_time_and_memory(eigsh,L,k=2,which = 'SA')[1])
