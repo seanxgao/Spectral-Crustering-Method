@@ -1,15 +1,205 @@
 import numpy as np
 from scipy.sparse import csr_matrix
-import time
-import matplotlib.pyplot as plt
-import random
-import sys
 from scipy import sparse as sp
-from scipy.sparse.linalg import eigsh  # sparse solver
+from scipy.sparse.linalg import eigsh as cpu_eigsh
 import os, math
 from concurrent.futures import ThreadPoolExecutor
+import cupy as cp
+import cupyx.scipy.sparse as csp
+from cupyx.scipy.sparse.linalg import eigsh as gpu_eigsh
 
-def bicut_group(L):
+
+def best_cut_finder(adj, gpu: bool, sparse: bool) -> int:
+    """
+    Compute the best cut index for symmetric adjacency matrices.
+
+    Args:
+        adj: matrix (dense or CSR; NumPy/SciPy on CPU or CuPy/cupyx on GPU)
+        gpu:  use GPU (CuPy) kernels if True, else CPU (NumPy/SciPy)
+        sparse: treat/convert to CSR and use O(nnz) path if True; else dense O(n^2)
+
+    Returns:
+        int: best cut index in [1, n-1]
+    """
+    # ---- helpers ----
+    def _best_cut_dense_np(A):
+        A = A.toarray() if hasattr(A, "toarray") else np.asarray(A)
+        n = A.shape[0]
+        if n < 2:
+            return 1
+        ps = np.zeros((n+1, n+1), dtype=np.float64)
+        ps[1:, 1:] = A
+        ps = ps.cumsum(0).cumsum(1)
+        i = np.arange(1, n, dtype=np.int64)
+        q = (ps[n, i] - ps[i, i]) / (i * (n - i))
+        return int(np.argmin(q) + 1)
+
+    def _best_cut_dense_cp(A):
+        A = A if isinstance(A, cp.ndarray) else cp.asarray(A)
+        n = A.shape[0]
+        if n < 2:
+            return 1
+        ps = cp.zeros((n+1, n+1), dtype=cp.float64)  # accumulate in fp64
+        ps[1:, 1:] = A
+        ps = ps.cumsum(0).cumsum(1)
+        i = cp.arange(1, n, dtype=cp.int64)
+        q = (ps[n, i] - ps[i, i]) / (i * (n - i))
+        return int(cp.asnumpy(cp.argmin(q)) + 1)
+
+    def _best_cut_sparse_sp(M):
+        # ensure CPU CSR
+        csr = M.tocsr() if sp.issparse(M) else sp.csr_matrix(M)
+        n = csr.shape[0]
+        if n < 2:
+            return 1
+        coo = csr.tocoo(copy=False)
+        r, c = coo.row, coo.col
+        v = coo.data.astype(np.float64, copy=False)
+        mask = c < r  # strict lower triangle (symmetric input)
+        if mask.any():
+            start = (c[mask] + 1).astype(np.int64, copy=False)
+            end   = (r[mask] + 1).astype(np.int64, copy=False)
+            w     = v[mask]
+            diff = np.zeros(n + 1, dtype=np.float64)
+            np.add.at(diff, start,  w)
+            np.add.at(diff, end,   -w)
+            pref = np.cumsum(diff)[:-1]
+        else:
+            pref = np.zeros(n, dtype=np.float64)
+        i = np.arange(1, n, dtype=np.int64)
+        q = pref[i] / (i * (n - i))
+        return int(np.argmin(q) + 1)
+
+    def _best_cut_sparse_csp(M):
+        # ensure GPU CSR
+        if isinstance(M, csp.csr_matrix):
+            csr = M
+        elif sp.issparse(M):
+            cpu = M.tocsr()
+            csr = csp.csr_matrix((cp.asarray(cpu.data, dtype=cp.float32),
+                                  cp.asarray(cpu.indices),
+                                  cp.asarray(cpu.indptr)),
+                                 shape=cpu.shape)
+        elif isinstance(M, cp.ndarray):
+            csr = csp.csr_matrix(M)
+        else:
+            csr = csp.csr_matrix(cp.asarray(M))
+        n = csr.shape[0]
+        if n < 2:
+            return 1
+        coo = csr.tocoo(copy=False)
+        r, c, v = coo.row, coo.col, coo.data
+        mask = c < r
+        if mask.any():
+            start = (c[mask] + 1).astype(cp.int64, copy=False)
+            end   = (r[mask] + 1).astype(cp.int64, copy=False)
+            w     = v[mask].astype(cp.float64, copy=False)   # accumulate in fp64
+            diff = cp.zeros(n + 1, dtype=cp.float64)
+            cp.add.at(diff, start,  w)
+            cp.add.at(diff, end,   -w)
+            pref = cp.cumsum(diff)[:-1]
+        else:
+            pref = cp.zeros(n, dtype=cp.float64)
+        i = cp.arange(1, n, dtype=cp.int64)
+        q = pref[i] / (i * (n - i))
+        return int(cp.asnumpy(cp.argmin(q)) + 1)
+
+    # ---- dispatch ----
+    if gpu:
+        return _best_cut_sparse_csp(adj) if sparse else _best_cut_dense_cp(adj)
+    else:
+        return _best_cut_sparse_sp(adj)   if sparse else _best_cut_dense_np(adj)
+
+def eigen_decomposition(L, gpu: bool, sparse: bool, k = 2):
+    L_csr = matrixtype(L, gpu=gpu, sparse=sparse)
+    zero_tol = 1e-2
+    n = L_csr.shape[0]
+
+    from matrix_master import visualize_laplacian_matrix
+    def _solve(k_now):
+        if gpu:
+            # gpu_eigsh assumed SciPy-like signature
+            w, v = gpu_eigsh(L_csr, k=k_now, which="SA")
+            w = cp.asnumpy(w)
+            v = cp.asnumpy(v)
+        else:
+            w, v = cpu_eigsh(L_csr, k=k_now, which="SA")
+        return w, v
+
+    # ---- first try: k (default 2) ----
+    from scipy.sparse.linalg import ArpackNoConvergence, ArpackError
+    while True:
+        try:
+            if k > n-1:
+                k = n-1
+            w, v = _solve(k)
+            nz = np.where(w > zero_tol)[0]
+            print(nz)
+            if nz.size:
+                print(nz[0], "th eigenvalue is the first non-zero one, where k =", k, "n =", n)
+                return v[:, nz[0]]
+            if k == n-1:
+                print(matrixtype(L, gpu=False, sparse=False))
+                raise ValueError("All eigenvalues are numerically zero; cannot proceed.")
+            else:
+                k = min(k*2, n - 1)
+            if matrixtype(L, gpu=False, sparse=False).diagonal().sum() < 1:
+                raise Warning("zero matrix")
+        except ArpackNoConvergence:
+            print("ARPACK did not converge with k =", k)
+            k = min(k*2, n - 1)
+class pilot:
+    def __init__(self):
+        self.parallel = False
+
+        self.sparsethred = 0
+        self.gputhred4eig = 0
+        self.gputhred4cut = 0
+
+        self.densityhasreached = False
+
+        self.eig = None
+        self.cut = None
+        self.sparse = None
+
+    def set_spthre(self, thr=0.25):
+        def sparse (L):
+            if sparse_score(L) <= thr:
+                return True
+            else:
+                self.sparse = lambda L: False
+                return False
+        self.sparse = sparse
+        self.sparsethred = thr
+
+    def set_gputhre(self, thred_eig = 10000, thred_cut=1000):
+        if self.parallel:
+            self.eig = lambda L: False
+            self.cut = lambda L: False
+        else:
+            def eig (L):
+                if L.shape[0] >= thred_eig:
+                    return True
+                else:
+                    self.eig = lambda L: False
+                    return False
+            self.eig = eig
+
+            def cut (L):
+                if L.shape[0] >= thred_cut:
+                    return True
+                else:
+                    self.cut = lambda L: False
+                    return False
+            self.cut = cut
+
+        self.gputhred4eig = thred_eig
+        self.gputhred4cut = thred_cut
+    def copy(self):
+        import copy
+        return copy.copy(self)
+
+def bicut_group(L, gpueigen=False, gpucut=False, sparse=False):
     """
     Enhanced spectral clustering function that returns both sign-based and optimal cuts.
     
@@ -19,41 +209,28 @@ def bicut_group(L):
     Returns:
         tuple: (first_group, second_group) where second_group may be empty
     """
-    # if structure not in ("dense", "sparse"):
-    #     raise ValueError("structure must be 'dense' or 'sparse'.")
-
     n = L.shape[0]
-
-    # Basis steps
     if n == 0:
-        raise ValueError("The Laplacian matrix is empty.") 
+        raise ValueError("The Laplacian matrix is empty.")
     if n == 1:
         return [0], []
     if n == 2:
         return [0], [1]
+
+    fiedler = eigen_decomposition(L, gpu=gpueigen, sparse=sparse)
     
-    _, vecs = eigsh(L, k=2, which='SA')
-    # Find the second smallest eigenvalue (Fiedler value)
-    fiedler_vector = vecs[:, 1]
-    sorted_args = np.argsort(fiedler_vector)
-    # Reorder adjacency matrix
-    adj = -L[np.ix_(sorted_args,sorted_args)]  # Full adjacency matrix
+    sorted_args = np.argsort(fiedler)
     
-    # Find best cut
-    ind = np.arange(1, n)
-    upper_tri_sums = np.array([np.sum(adj[i:, :i]) for i in ind])
-    qualities = upper_tri_sums / (ind * (n - ind))
+    adj = -L[np.ix_(sorted_args, sorted_args)]
     
-    best_cut = np.argmin(qualities) + 1
-    
-    # Get the groups based on sorted indices
+    best_cut = best_cut_finder(adj, gpu=gpucut, sparse=sparse)
+
     first_group = sorted_args[:best_cut]
     second_group = sorted_args[best_cut:]
-
-    # Continue with the split
     if 0 in first_group:
         return first_group, second_group
     return second_group, first_group
+
 
 class BiCutNode:
     """Node class for the bi-cut tree structure"""
@@ -93,7 +270,7 @@ class BiCutNode:
             is_last_child = (i == len(children) - 1)
             child.print_fancy_tree(new_prefix, is_last_child, False)
 
-def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = True):
+def treebuilder(L, thre = None, indices=None, parallel = True, manager = None):
     """
     Recursively apply bi-cut to create a tree structure.
     
@@ -105,33 +282,31 @@ def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = Tr
         BiCutNode: Root of the bi-cut tree
     """
 
+    if manager is None:
+        manager = pilot()
+        manager.parallel = parallel
+        manager.set_spthre(0.25)
+        manager.set_gputhre(10000, 1000)
+    
+    if manager.sparse is None or manager.eig is None or manager.cut is None:
+        manager.parallel = parallel
+        manager.set_spthre(0.25)
+        manager.set_gputhre(10000, 1000)
+
     def _make_sub_laplacian_blocks(L_sub, g1_local, g2_local):
         
         idx1 = np.asarray(g1_local)
         idx2 = np.asarray(g2_local) 
         
-        if structure == "sparse":
-            if not sp.isspmatrix_csr(L_sub): L_sub = csr_matrix(L_sub)
-            L11 = L_sub[idx1, :][:, idx1].copy()
-            L22 = L_sub[idx2, :][:, idx2].copy()
-            
-            diff1  = np.asarray(L11.sum(axis=1)).ravel()
-            L11.setdiag(L11.diagonal() - diff1)
-            
-            diff2  = np.asarray(L22.sum(axis=1)).ravel()
-            L22.setdiag(L22.diagonal() - diff2)
-            
-            return L11, L22
-        else:
-            if sp.isspmatrix_csr(L_sub): L_sub = L_sub.toarray()
-            L11 = L_sub[np.ix_(idx1, idx1)].copy()
-            L22 = L_sub[np.ix_(idx2, idx2)].copy()
+        L_sub = matrixtype(L_sub, gpu=False, sparse=False)  # Ensure CPU dense for indexing
+        L11 = L_sub[np.ix_(idx1, idx1)].copy()
+        L22 = L_sub[np.ix_(idx2, idx2)].copy()
 
-            diff1 = L11.sum(axis=1)
-            diff2 = L22.sum(axis=1)
-            L11 = L11 - np.diag(diff1)
-            L22 = L22 - np.diag(diff2)
-            return L11, L22
+        diff1 = L11.sum(axis=1)
+        diff2 = L22.sum(axis=1)
+        L11 = L11 - np.diag(diff1)
+        L22 = L22 - np.diag(diff2)
+        return L11, L22
 
     # Initialize indices if not provided
     if indices is None:
@@ -150,18 +325,15 @@ def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = Tr
     if thre != None and n <= thre:
         return BiCutNode(indices)
 
-    if structure not in ("dense", "sparse"):
-        raise ValueError("structure must be 'dense' or 'sparse'.")
-
     if parallel:
         workers = max(os.cpu_count() or 1, 1)
         max_parallel_depth = max(1, int(math.ceil(math.log2(workers))))
         
     # === 递归构建（根据 parallel 选择并/串行）===
-    def _build(L_sub, idxs, depth, executor=None):
+    def _build(L_sub, idxs, depth, executor=None,manager=None):
         n = len(idxs)
         if n == 0:
-            raise ValueError("The matrix is empty.")
+            raise ValueError("The matrix is empty, should not happen.")
         if n == 1:
             return BiCutNode(idxs)
         if n == 2:
@@ -169,11 +341,19 @@ def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = Tr
         if (thre is not None) and (n <= thre):
             return BiCutNode(idxs)
 
+        gpueig = manager.eig(L_sub)
+        gpucut = manager.cut(L_sub)
+        sparse = manager.sparse(L_sub)
         # bi-cut
-        g1_local, g2_local = bicut_group(L_sub)
-        # 若有一侧空，直接收叶
-        if len(g1_local) == 0 or len(g2_local) == 0:
-            return BiCutNode(idxs)
+
+        from scipy.sparse.linalg import ArpackError
+        try:
+            g1_local, g2_local = bicut_group(L_sub, gpueigen=gpueig, gpucut=gpucut, sparse=sparse)
+            if not g1_local.shape[0] or not g2_local.shape[0]:
+                raise ValueError("Bi-cut resulted in an empty group; cannot proceed.")
+        except ArpackError as e:
+            print(f"Error occurred during bi-cut: {e}")
+            return
 
         # 局部→全局
         g1 = [idxs[i] for i in g1_local]
@@ -184,84 +364,101 @@ def treebuilder(L, thre = None, indices=None, structure = "dense", parallel = Tr
 
         # 递归：并行 or 串行
         if parallel and (depth < max_parallel_depth) and (executor is not None) and (workers > 1):
-            f_left  = executor.submit(_build, L11, g1, depth + 1, executor)
-            f_right = executor.submit(_build, L22, g2, depth + 1, executor)
+            f_left  = executor.submit(_build, L11, g1, depth + 1, executor, manager.copy())
+            f_right = executor.submit(_build, L22, g2, depth + 1, executor, manager.copy())
             left  = f_left.result()
             right = f_right.result()
         else:
-            left  = _build(L11, g1, depth + 1, executor)
-            right = _build(L22, g2, depth + 1, executor)
+            left  = _build(L11, g1, depth + 1, executor, manager.copy())
+            right = _build(L22, g2, depth + 1, executor, manager.copy())
 
         return BiCutNode(idxs, left, right)
 
     # 顶层入口：并行就开线程池；串行就直接跑
     if parallel:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            return _build(L, indices, 0, ex)
+            return _build(L, indices, 0, ex, manager)
     else:
-        return _build(L, indices, 0, None)
+        return _build(L, indices, 0, None, manager)
 
-
-
-def treebuilder_parallel(L, thre=None, workers=None, max_parallel_depth=None):
+def matrixtype(L, sparse: bool, gpu: bool):
     """
-    简洁并行版 BiCut 构树（线程池）
-    参数：
-      - L: 整体拉普拉斯矩阵（numpy 或 scipy.sparse CSR/CSC）
-      - thre: 叶子阈值（子块规模 ≤ thre 就不再切）
-      - workers: 并行线程数（默认=CPU核数）
-      - max_parallel_depth: 最大并行深度，超过就转串行，防止任务过多
-    返回：
-      - BiCutNode 根节点
+    将 L 转成以下四种之一（仅由 sparse / gpu 决定）：
+      - gpu=True,  sparse=True  -> cupyx.scipy.sparse.csr_matrix
+      - gpu=True,  sparse=False -> cupy.ndarray
+      - gpu=False, sparse=True  -> scipy.sparse.csr_matrix
+      - gpu=False, sparse=False -> numpy.ndarray
+
+    允许的输入类型：
+      - cupyx.scipy.sparse.csr_matrix
+      - cupy.ndarray
+      - numpy.ndarray
+      - scipy.sparse.csr_matrix
+
+    约定：sp, cp, csp 已成功导入：
+      import scipy.sparse as sp
+      import cupy as cp
+      import cupyx.scipy.sparse as csp
+    同时假定已 import numpy as np
     """
-    if workers is None:
-        workers = max(os.cpu_count() or 1, 1)
+    # ==== 目标：GPU + SPARSE -> cupyx.scipy.sparse.csr_matrix ====
+    if gpu and sparse:
+        if csp.isspmatrix(L):
+            return L.tocsr()                         # 已是 GPU 稀疏 -> CSR
+        if sp.issparse(L):
+            return csp.csr_matrix(L)                 # CPU 稀疏 -> 复制到 GPU
+        if isinstance(L, cp.ndarray):
+            return csp.csr_matrix(L)                 # GPU 稠密 -> GPU CSR
+        # 其余视为 CPU 稠密 / array-like
+        return csp.csr_matrix(cp.asarray(L))         # CPU 稠密 -> GPU CSR
 
-    # 经验：2^d >= workers ⇒ d ≈ ceil(log2(workers))
-    if max_parallel_depth is None:
-        max_parallel_depth = max(1, int(math.ceil(math.log2(workers))))
+    # ==== 目标：GPU + DENSE -> cupy.ndarray ====
+    if gpu and not sparse:
+        if isinstance(L, cp.ndarray):
+            return L                                  # 已是 GPU 稠密
+        if csp.isspmatrix(L):
+            return L.toarray()                        # GPU 稀疏 -> GPU 稠密(cupy)
+        if sp.issparse(L):
+            return cp.asarray(L.toarray())            # CPU 稀疏 -> CPU 稠密 -> GPU 稠密
+        # 其余视为 CPU 稠密 / array-like
+        return cp.asarray(L)                          # CPU 稠密 -> GPU 稠密
 
-    # 内部递归函数：当 depth < max_parallel_depth 时并行左右子树，否则串行
-    def _build(L_sub, indices, depth, executor):
-        n = len(indices)
-        # —— 基本情形：小块或阈值内就收叶子
-        if n == 0:
-            raise ValueError("The matrix is empty.")
-        if n == 1:
-            return BiCutNode(indices)
-        if n == 2:
-            return BiCutNode(indices, BiCutNode([indices[0]]), BiCutNode([indices[1]]))
-        if (thre is not None) and (n <= thre):
-            return BiCutNode(indices)
+    # ==== 目标：CPU + SPARSE -> scipy.sparse.csr_matrix ====
+    if (not gpu) and sparse:
+        if sp.issparse(L):
+            return sp.csr_matrix(L)                   # 已是 CPU 稀疏 -> CSR
+        if csp.isspmatrix(L):
+            return L.get().tocsr()                    # GPU 稀疏 -> CPU 稀疏
+        if isinstance(L, cp.ndarray):
+            return sp.csr_matrix(cp.asnumpy(L))       # GPU 稠密 -> CPU 稀疏
+        # 其余视为 CPU 稠密 / array-like
+        return sp.csr_matrix(L)                       # CPU 稠密 -> CPU 稀疏
 
-        # —— 试着再切一刀
-        g1_local, g2_local = bicut_group(L_sub)
-        if len(g2_local) == 0: 
-            return BiCutNode(indices)
+    # ==== 目标：CPU + DENSE -> numpy.ndarray ====
+    # gpu=False and sparse=False
+    if sp.issparse(L):
+        return L.toarray()                            # CPU 稀疏 -> CPU 稠密(numpy)
+    if csp.isspmatrix(L):
+        return L.get().toarray()                      # GPU 稀疏 -> CPU 稠密(numpy)
+    if isinstance(L, cp.ndarray):
+        return cp.asnumpy(L)                          # GPU 稠密 -> CPU 稠密
+    # 其余视为 CPU 稠密 / array-like
+    return np.asarray(L)                               # 保证是 numpy.ndarray
 
-        # 局部→全局 索引
-        g1 = [indices[i] for i in g1_local]
-        g2 = [indices[i] for i in g2_local]
+def sparse_score(L):
+    """
+    Note:
+        only for laplacian matrix
+    """
+    n = L.shape[0]
+    if sp.issparse(L):  # CPU sparse
+        s = float(L.diagonal().sum(dtype=np.float64))
+    elif csp.isspmatrix(L):  # GPU sparse
+        s = float(cp.asnumpy(L.diagonal().sum(dtype=cp.float64)))
+    elif isinstance(L, cp.ndarray):  # GPU dense
+        s = float(cp.asnumpy(L.diagonal().sum(dtype=cp.float64)))
+    else:  # CPU dense / array-like
+        X = np.asarray(L)
+        s = float(X.diagonal().sum(dtype=np.float64))
 
-        # 子块拉普拉斯（与局部索引对齐）
-        L11 = L_sub[np.ix_(g1_local, g1_local)]
-        L22 = L_sub[np.ix_(g2_local, g2_local)]
-
-        # —— 到这一步需要构左右子树：并行或串行
-        if depth < max_parallel_depth and workers > 1 and executor is not None:
-            # 并行提交左右子树
-            f_left  = executor.submit(_build, L11, g1, depth + 1, executor)
-            f_right = executor.submit(_build, L22, g2, depth + 1, executor)
-            left  = f_left.result()
-            right = f_right.result()
-        else:
-            # 超过并行深度，直接串行，避免任务过多
-            left  = _build(L11, g1, depth + 1, executor)
-            right = _build(L22, g2, depth + 1, executor)
-
-        return BiCutNode(indices, left, right)
-
-    # 线程池外层只开一次；把根任务丢进去递归构建
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        root = _build(L, list(range(L.shape[0])), 0, ex)
-    return root
+    return s / (n * n)

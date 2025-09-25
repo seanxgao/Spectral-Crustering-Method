@@ -1,4 +1,6 @@
 from SCOPE import *
+import matplotlib.pyplot as plt
+import random
 
 def generate_test_laplacian(size1, size2, prob1, prob2, prob_between):
     """
@@ -103,7 +105,7 @@ def generate_layers_groups_graph(
     p_intra_subgroup=0.8,
     p_intra_supergroup=0.3,
     p_inter_supergroup=0.05,
-    seed = None,
+    seed = None
 ):
     """
     Generates a hierarchical adjacency matrix and its Laplacian.
@@ -148,6 +150,7 @@ def generate_layers_groups_graph(
 
     degree = np.sum(A, axis=1)
     L = np.diag(degree) - A
+
     return L
 
 def matrix_shuffle(matrix):
@@ -165,8 +168,8 @@ def visualize_laplacian_matrix(laplacian_matrix, show = True):
     Returns:
         visualization of the connections
     """
+    if sp.isspmatrix_csr(laplacian_matrix): laplacian_matrix = laplacian_matrix.toarray()
     # Filled the matrix's diagonal with 0
-    np.fill_diagonal(laplacian_matrix, 0)
     # Create binary matrix: 1 for non-zero elements, 0 for zero elements
     binary_matrix = (laplacian_matrix != 0).astype(int)
     
@@ -238,3 +241,8 @@ def grade_matrix(matrix):
     distance_matrix = j_indices - i_indices
     
     return int(np.sum(distance_matrix * mask * matrix))
+
+
+    
+    
+    

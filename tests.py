@@ -2,11 +2,10 @@ import numpy as np
 from scipy.sparse import linalg as LA
 import time
 import matplotlib.pyplot as plt
-
 from SCOPE import *
 from matrix_master import *
 
-def test_bicut_accuracy(size1, size2, prob1, prob2, prob_between, num_tests=10):
+def test_bicut_accuracy(size1, size2, prob1, prob2, prob_between, num_tests=10, gpu = False, sparse = False):
     """
     Test the accuracy of spectral clustering on generated graphs.
     
@@ -18,9 +17,9 @@ def test_bicut_accuracy(size1, size2, prob1, prob2, prob_between, num_tests=10):
     for _ in range(num_tests):
         # Generate test graph
         L = generate_test_laplacian(size1, size2, prob1, prob2, prob_between)
-        
+
         # Run clustering
-        predicted_group, _ = bicut_group(L)
+        predicted_group, _ = bicut_group(L, gpu, sparse)
         predicted_group.sort()
         
         # True first group is [0, 1, ..., size1-1]
@@ -55,9 +54,6 @@ def test_duration_memory(
     thre=None,
     show=False,
     use_parallel=False,
-    workers=None,
-    max_parallel_depth=None,
-    stru = "dense"
 ):
     """
     行为和你现有的 test_duration_memory 一致，但多了 use_parallel 与并行参数。
@@ -67,7 +63,7 @@ def test_duration_memory(
     # 1) 乱序
     L = matrix_shuffle(oL)
 
-    T, duration, peak_memory = measure_time_and_memory(treebuilder, L, thre, None, stru, use_parallel)
+    T, duration, peak_memory = measure_time_and_memory(treebuilder, L, thre, None, use_parallel)
 
     # 4) 取顺序并重排
     order = T.get_order()
@@ -92,22 +88,22 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-def run_one_graph_test(sup: int, sub: int, node: int, thre: int, parallel: bool = False, structure: str = "dense"):
-    """
-    只跑一次：构图 -> 两次测量(thre=node 与 thre=1)。
-    不打印，不写文件；返回一个 dict，外层随意使用。
-    """
+def run_one_graph_test(sup: int, sub: int, node: int,
+                    p_intrasub: float, p_intrasup: float, p_intersup: float,
+                    thre: int = 1, parallel: bool = False):
+
     # 构建一次图
     L = generate_layers_groups_graph(
         num_supergroups=sup,
         num_subgroups_per_supergroup=sub,
         nodes_per_subgroup=node,
-        p_intra_subgroup=0.8,
-        p_intra_supergroup=0.3,
-        p_inter_supergroup=0.05,
+        p_intra_subgroup=p_intrasub,
+        p_intra_supergroup=p_intrasup,
+        p_inter_supergroup=p_intersup,
     )
-    
-    a, b, c = test_duration_memory(L, thre=thre, use_parallel = parallel, stru = structure)
+    visualize_laplacian_matrix(L, show=True)
+
+    a, b, c = test_duration_memory(L, thre=thre, use_parallel=parallel)
 
     return {
         "duration": a,
@@ -116,6 +112,7 @@ def run_one_graph_test(sup: int, sub: int, node: int, thre: int, parallel: bool 
     }
 
 def parallal_choices_test(iter: int, sup: int, sub: int, node: int,
+                          p_intrasub: float, p_intrasup: float, p_intersup: float,
                           csv_filename: str = "parallel_test_results.csv"):
     """
     外层循环驱动（单次阈值版本）：
@@ -140,12 +137,13 @@ def parallal_choices_test(iter: int, sup: int, sub: int, node: int,
             ])
 
         for i in range(1, iter + 1):
-            base_total = sup * sub * node
-            print(f"Processing iteration {i}/{iter} (total_nodes base = {base_total}, scale = {i})")
+            total = sup * sub * node * i
+            print(f"Processing iteration {i}/{iter} (total nodes = {total})")
 
             # 1) 放大 sup
             sup_i, sub_i, node_i = i * sup, sub, node
-            res = run_one_graph_test(sup_i, sub_i, node_i)
+            res = run_one_graph_test(sup_i, sub_i, node_i,
+                                    p_intrasub, p_intrasup, p_intersup)
             total_nodes = sup_i * sub_i * node_i
             print(f"  Matrix 1 - supergroups: {sup_i}×{sub_i}×{node_i}")
             print(f"    duration={res['duration']:.3f}s, peak memory={res['memory']:.3f}Mb, ratio={100*res['ratio']:.1f}%")
@@ -154,7 +152,8 @@ def parallal_choices_test(iter: int, sup: int, sub: int, node: int,
 
             # 2) 放大 sub
             sup_i, sub_i, node_i = sup, i * sub, node
-            res = run_one_graph_test(sup_i, sub_i, node_i)
+            res = run_one_graph_test(sup_i, sub_i, node_i,
+                                    p_intrasub, p_intrasup, p_intersup)
             total_nodes = sup_i * sub_i * node_i
             print(f"  Matrix 2 - subgroups: {sup_i}×{sub_i}×{node_i}")
             print(f"    duration={res['duration']:.3f}s, peak memory={res['memory']:.3f}Mb, ratio={100*res['ratio']:.1f}%")
@@ -163,7 +162,8 @@ def parallal_choices_test(iter: int, sup: int, sub: int, node: int,
 
             # 3) 放大 node
             sup_i, sub_i, node_i = sup, sub, i * node
-            res = run_one_graph_test(sup_i, sub_i, node_i)
+            res = run_one_graph_test(sup_i, sub_i, node_i,
+                                    p_intrasub, p_intrasup, p_intersup)
             total_nodes = sup_i * sub_i * node_i
             print(f"  Matrix 3 - nodes_per_sub: {sup_i}×{sub_i}×{node_i}")
             print(f"    duration={res['duration']:.3f}s, peak memory={res['memory']:.3f}Mb, ratio={100*res['ratio']:.1f}%")
@@ -261,10 +261,4 @@ def plot_results(csv_filename='parallel_test_results.csv'):
     plt.savefig('parallel_test_results.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-L = generate_layers_groups_graph(2,20,30,0.8,0.3,0.05)
-print(test_duration_memory(L,thre=1,show=False,use_parallel=True,stru = "dense"))
-print(test_duration_memory(L,thre=1,show=False,use_parallel=False,stru = "dense"))
-print(test_duration_memory(L,thre=1,show=False,use_parallel=False,stru = "sparse"))
-# visualize_laplacian_matrix(L)
-# print(measure_time_and_memory(eigsh,csr_matrix(L),k=2,which = 'SA')[1])
-# print(measure_time_and_memory(eigsh,L,k=2,which = 'SA')[1])
+parallal_choices_test(100, 1, 5, 20, 1, 0., 0.0)
